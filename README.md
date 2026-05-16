@@ -2,6 +2,8 @@
 
 A near-real-time browser microphone transcription system using OpenAI Whisper, FastAPI WebSockets, WebRTC VAD, and a live latency/RTF dashboard.
 
+The model can be tested here: [Whisper_LIVE_Transcription](https://huggingface.co/spaces/aerofa24/Whisper_Real_Time_ASR)
+
 This repository was converted from the working Colab notebook into a clean GitHub/Hugging Face Spaces project structure.
 
 ## What this project does
