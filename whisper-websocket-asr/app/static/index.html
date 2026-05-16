@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Whisper WebSocket ASR + VAD + Reset</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }
+        button { padding: 10px 18px; margin-right: 10px; margin-top: 5px; font-size: 16px; cursor: pointer; }
+        .card { background: white; border-radius: 12px; padding: 18px; margin-top: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .transcript { padding: 10px; border-bottom: 1px solid #ddd; }
+        .small { color: #555; font-size: 13px; }
+        .debug { font-family: monospace; background: #f1f1f1; padding: 10px; border-radius: 8px; white-space: pre-wrap; }
+        canvas { width: 100%; max-width: 900px; height: 260px; border: 1px solid #ddd; background: white; margin-top: 10px; margin-bottom: 25px; }
+    </style>
+</head>
+<body>
+    <h1>Whisper WebSocket ASR + WebRTC VAD + Reset</h1>
+
+    <div class="card">
+        <button onclick="startStreaming()">Start Microphone</button>
+        <button onclick="stopStreaming()">Stop</button>
+        <button onclick="resetSession()">Reset / New Recording</button>
+
+        <p>Status: <b id="status">Not connected</b></p>
+        <p>App version: <span id="appVersion">unknown</span></p>
+        <p>Browser sample rate: <span id="sampleRate">unknown</span></p>
+        <p>Diarization: <span id="diarization">unknown</span></p>
+        <p>Browser mic level: <b id="micLevel">0.00000</b></p>
+        <p>Browser chunks sent: <b id="browserChunksSent">0</b></p>
+        <p class="small">Tip: Click Reset / New Recording before starting a fresh test.</p>
+    </div>
+
+    <div class="card">
+        <h2>Backend Debug</h2>
+        <div id="debugBox" class="debug">Waiting for metrics...</div>
+    </div>
+
+    <div class="card">
+        <h2>Latency / RTF Dashboard</h2>
+        <p id="summary">No metrics yet.</p>
+
+        <h3>Latency per Segment</h3>
+        <canvas id="latencyChart" width="900" height="260"></canvas>
+
+        <h3>RTF per Segment</h3>
+        <canvas id="rtfChart" width="900" height="260"></canvas>
+    </div>
+
+    <div class="card">
+        <h2>Recent Transcripts</h2>
+        <div id="transcripts"></div>
+    </div>
+
+    <div class="card">
+        <h2>Recent Speaker Turns</h2>
+        <div id="speakerTurns"></div>
+    </div>
+
+<script>
+let ws = null;
+let audioContext = null;
+let processor = null;
+let source = null;
+let stream = null;
+let browserChunksSent = 0;
+
+async function startStreaming() {
+    document.getElementById("status").innerText = "Starting...";
+
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        audioContext = new AudioContext();
+        await audioContext.resume();
+
+        const sampleRate = audioContext.sampleRate;
+        document.getElementById("sampleRate").innerText = sampleRate;
+
+        const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
+        ws = new WebSocket(wsProtocol + location.host + "/ws/audio");
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+            document.getElementById("status").innerText = "Connected";
+            ws.send(JSON.stringify({ type: "start", sample_rate: sampleRate }));
+        };
+
+        ws.onclose = () => { document.getElementById("status").innerText = "Disconnected"; };
+        ws.onerror = (err) => {
+            console.error("WebSocket error:", err);
+            document.getElementById("status").innerText = "WebSocket error";
+        };
+
+        source = audioContext.createMediaStreamSource(stream);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (event) => {
+            const input = event.inputBuffer.getChannelData(0);
+            const float32 = new Float32Array(input.length);
+            float32.set(input);
+
+            let sum = 0;
+            for (let i = 0; i < float32.length; i++) {
+                sum += float32[i] * float32[i];
+            }
+
+            const rms = Math.sqrt(sum / float32.length);
+            document.getElementById("micLevel").innerText = rms.toFixed(5);
+
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+            ws.send(float32.buffer);
+            browserChunksSent += 1;
+            document.getElementById("browserChunksSent").innerText = browserChunksSent;
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+    } catch (e) {
+        console.error(e);
+        document.getElementById("status").innerText = "Mic/WebSocket failed: " + e.message;
+    }
+}
+
+function stopStreaming() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "stop" }));
+        ws.close();
+    }
+
+    if (processor) { try { processor.disconnect(); } catch (e) {} }
+    if (source) { try { source.disconnect(); } catch (e) {} }
+    if (stream) { stream.getTracks().forEach(track => track.stop()); }
+    if (audioContext) { try { audioContext.close(); } catch (e) {} }
+
+    ws = null;
+    audioContext = null;
+    processor = null;
+    source = null;
+    stream = null;
+    document.getElementById("status").innerText = "Stopped";
+}
+
+async function resetSession() {
+    stopStreaming();
+
+    browserChunksSent = 0;
+    document.getElementById("browserChunksSent").innerText = "0";
+    document.getElementById("micLevel").innerText = "0.00000";
+
+    const res = await fetch("/reset", { method: "POST" });
+    const data = await res.json();
+    console.log(data);
+
+    document.getElementById("summary").innerText = "Session reset. Click Start Microphone to begin again.";
+    document.getElementById("transcripts").innerHTML = "";
+    document.getElementById("speakerTurns").innerHTML = "";
+
+    ["latencyChart", "rtfChart"].forEach(id => {
+        const canvas = document.getElementById(id);
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    });
+
+    document.getElementById("status").innerText = "Reset complete";
+}
+
+async function refreshMetrics() {
+    const res = await fetch("/metrics");
+    const data = await res.json();
+
+    document.getElementById("appVersion").innerText = data.app_version || "unknown";
+    document.getElementById("diarization").innerText = data.diarization_enabled ? "enabled" : "disabled";
+
+    const debugText =
+        "app_version: " + data.app_version + "\n" +
+        "connected: " + data.connected + "\n" +
+        "browser_sample_rate: " + data.browser_sample_rate + "\n" +
+        "raw_chunks_received: " + data.raw_chunks_received + "\n" +
+        "raw_audio_seconds_received: " + Number(data.raw_audio_seconds_received || 0).toFixed(2) + "\n" +
+        "last_chunk_rms: " + Number(data.last_chunk_rms || 0).toFixed(6) + "\n" +
+        "worker_running: " + data.worker_running + "\n" +
+        "worker_items_processed: " + data.worker_items_processed + "\n" +
+        "vad_segments_created: " + data.vad_segments_created + "\n" +
+        "segments_transcribed: " + data.segments_transcribed + "\n" +
+        "segments_filtered: " + data.segments_filtered + "\n" +
+        "queue_size: " + data.queue_size + "\n" +
+        "last_error: " + data.last_error;
+
+    document.getElementById("debugBox").innerText = debugText;
+
+    const metrics = data.metrics || [];
+    const transcripts = data.transcripts || [];
+    const turns = data.speaker_turns || [];
+
+    if (metrics.length > 0) {
+        const avgLatency = metrics.reduce((s, x) => s + x.latency_sec, 0) / metrics.length;
+        const avgRTF = metrics.reduce((s, x) => s + x.rtf, 0) / metrics.length;
+        const last = metrics[metrics.length - 1];
+
+        document.getElementById("summary").innerText =
+            `Segments: ${metrics.length} | Last latency: ${last.latency_sec.toFixed(3)}s | ` +
+            `Last RTF: ${last.rtf.toFixed(3)} | Avg latency: ${avgLatency.toFixed(3)}s | Avg RTF: ${avgRTF.toFixed(3)}`;
+    }
+
+    const tDiv = document.getElementById("transcripts");
+    tDiv.innerHTML = "";
+
+    transcripts.slice().reverse().forEach(t => {
+        const div = document.createElement("div");
+        div.className = "transcript";
+        div.innerHTML = `<b>${t.speaker}</b>: ${t.text}<br><span class="small">${t.timestamp} | ${t.start_sec.toFixed(2)}-${t.end_sec.toFixed(2)}s | latency=${t.latency_sec.toFixed(3)}s | RTF=${t.rtf.toFixed(3)}</span>`;
+        tDiv.appendChild(div);
+    });
+
+    const sDiv = document.getElementById("speakerTurns");
+    sDiv.innerHTML = "";
+
+    turns.slice().reverse().forEach(turn => {
+        const div = document.createElement("div");
+        div.className = "small";
+        div.innerText = `${turn.speaker}: ${turn.start.toFixed(2)}s - ${turn.end.toFixed(2)}s`;
+        sDiv.appendChild(div);
+    });
+
+    drawChart(metrics);
+}
+
+function drawSingleChart(canvasId, values, title, yLabel) {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext("2d");
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!values || values.length === 0) {
+        ctx.font = "14px Arial";
+        ctx.fillText("No data yet", 20, 40);
+        return;
+    }
+
+    const paddingLeft = 65;
+    const paddingRight = 25;
+    const paddingTop = 35;
+    const paddingBottom = 45;
+
+    const width = canvas.width - paddingLeft - paddingRight;
+    const height = canvas.height - paddingTop - paddingBottom;
+
+    const minVal = 0;
+    const maxVal = Math.max(...values, 0.001) * 1.2;
+
+    ctx.font = "16px Arial";
+    ctx.fillText(title, paddingLeft, 22);
+
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, paddingTop);
+    ctx.lineTo(paddingLeft, paddingTop + height);
+    ctx.lineTo(paddingLeft + width, paddingTop + height);
+    ctx.stroke();
+
+    ctx.font = "12px Arial";
+    const numTicks = 5;
+
+    for (let i = 0; i <= numTicks; i++) {
+        const tickValue = minVal + (i / numTicks) * (maxVal - minVal);
+        const y = paddingTop + height - ((tickValue - minVal) / (maxVal - minVal)) * height;
+
+        ctx.beginPath();
+        ctx.moveTo(paddingLeft, y);
+        ctx.lineTo(paddingLeft + width, y);
+        ctx.stroke();
+
+        ctx.fillText(tickValue.toFixed(3), 8, y + 4);
+    }
+
+    ctx.beginPath();
+
+    values.forEach((v, i) => {
+        const x = paddingLeft + (i / Math.max(values.length - 1, 1)) * width;
+        const y = paddingTop + height - ((v - minVal) / (maxVal - minVal)) * height;
+
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+
+    ctx.stroke();
+
+    values.forEach((v, i) => {
+        const x = paddingLeft + (i / Math.max(values.length - 1, 1)) * width;
+        const y = paddingTop + height - ((v - minVal) / (maxVal - minVal)) * height;
+
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+
+    ctx.font = "12px Arial";
+    ctx.fillText("Segment index", paddingLeft + width / 2 - 35, canvas.height - 12);
+
+    ctx.save();
+    ctx.translate(18, paddingTop + height / 2 + 35);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(yLabel, 0, 0);
+    ctx.restore();
+}
+
+function drawChart(metrics) {
+    if (!metrics || metrics.length === 0) {
+        drawSingleChart("latencyChart", [], "Latency per Segment", "seconds");
+        drawSingleChart("rtfChart", [], "RTF per Segment", "RTF");
+        return;
+    }
+
+    const values = metrics.slice(-40);
+    const latencies = values.map(x => x.latency_sec);
+    const rtfs = values.map(x => x.rtf);
+
+    drawSingleChart("latencyChart", latencies, "Latency per Segment", "seconds");
+    drawSingleChart("rtfChart", rtfs, "Real-Time Factor per Segment", "RTF");
+}
+
+setInterval(refreshMetrics, 1000);
+</script>
+</body>
+</html>

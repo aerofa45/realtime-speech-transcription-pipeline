@@ -1,0 +1,9 @@
+services:
+  whisper-asr:
+    build: .
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      - PORT=7860

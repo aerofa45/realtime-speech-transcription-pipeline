@@ -1,0 +1,13 @@
+flowchart TD
+    A[Browser Microphone] --> B[Web Audio API]
+    B --> C[Float32 PCM Chunks]
+    C --> D[WebSocket /ws/audio]
+    D --> E[FastAPI Backend]
+    E --> F[queue.Queue]
+    F --> G[Worker Thread]
+    G --> H[Torchaudio Resampling]
+    H --> I[WebRTC VAD]
+    I --> J[Speech Segment Buffer]
+    J --> K[Whisper Decode]
+    K --> L[Hallucination Filter]
+    L --> M[Dashboard + Logs]
