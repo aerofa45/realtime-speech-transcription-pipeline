@@ -332,4 +332,4 @@ Use HTTPS. Browser microphone access may be blocked on public HTTP.
 
 ## Limitations
 
--   Diarization is optional and adds latency.
+-   Diarization is optional and adds latency. However ONNX optimization makes the latency decrease by 40 percent.
