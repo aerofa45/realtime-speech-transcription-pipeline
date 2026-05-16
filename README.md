@@ -1,4 +1,4 @@
-# Real-Time Speech Transcription Pipeline
+# Whsiper Real-Time Speech Transcription Pipeline
 
 A lightweight Python project that simulates a real-time speech-to-text workflow using audio chunking,
 preprocessing, MFCC feature extraction, and a small PyTorch inference model.
